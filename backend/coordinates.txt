@@ -1,0 +1,17 @@
+A1 (x_start=63, y_start=291, x_end=243, y_end=454)
+(x_start=60, y_start=11, x_end=227, y_end=189)
+
+
+B1 (x_start=382, y_start=304, x_end=544, y_end=452)
+(x_start=382, y_start=160, x_end=541, y_end=300)
+(x_start=381, y_start=9, x_end=542, y_end=156)
+
+PARKING_SPOT_ZONES = {
+    "A1": (63, 291, 243, 454), # Example: Replace with your actual coordinates
+    "A2": (60, 11, 227, 189),
+    
+    "B1": (382, 304, 544, 452),
+    "B2": (380, 160, 541, 300),
+    "B3": (381, 9, 542, 156),
+    
+}

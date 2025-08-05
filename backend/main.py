@@ -1,19 +1,25 @@
-from fastapi import FastAPI, Depends, HTTPException
+# backend/main.py
+
+from fastapi import FastAPI, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
-from typing import List
-
+from typing import List, Optional
 from pydantic import BaseModel
 from . import models, database
 
+# Create database tables
 models.Base.metadata.create_all(bind=database.engine)
 
 app = FastAPI()
 
+# --- FIX APPLIED HERE ---
+# Added the default Vite port (5173) to the list of allowed origins.
+# This tells the backend server that it's safe to accept requests
+# from your React application.
 origins = [
-    "http://localhost:3000",
+    "http://localhost:3000", # For create-react-app
+    "http://localhost:5173", # For Vite
 ]
-
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
@@ -22,6 +28,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# --- Pydantic Models ---
 class DetectionItem(BaseModel):
     spot_id: str
     bus_number: str
@@ -30,6 +37,7 @@ class DetectionPayload(BaseModel):
     camera_id: str
     detections: List[DetectionItem]
 
+# --- Database Dependency ---
 def get_db():
     db = database.SessionLocal()
     try:
@@ -37,52 +45,61 @@ def get_db():
     finally:
         db.close()
 
+# --- API Endpoints ---
+
 @app.post("/api/detections")
 def receive_detections(payload: DetectionPayload, db: Session = Depends(get_db)):
-    
+    """
+    Receives parking detection data from the detection script and updates the
+    current location of each bus. This uses an "upsert" logic.
+    """
     print(f"Received detections from {payload.camera_id}")
+    
+    detected_spot_ids = {d.spot_id for d in payload.detections}
+    spots_this_camera_sees_query = db.query(models.Spot.spot_id).filter(models.Spot.camera_id == payload.camera_id).all()
+    spots_this_camera_sees_set = {s.spot_id for s in spots_this_camera_sees_query}
+    
+    empty_spots = spots_this_camera_sees_set - detected_spot_ids
 
-    db.query(models.ParkingLog).filter(models.ParkingLog.camera_id == payload.camera_id).delete()
+    if empty_spots:
+        db.query(models.BusLocation).filter(
+            models.BusLocation.spot_id.in_(empty_spots)
+        ).delete(synchronize_session=False)
 
     for detection in payload.detections:
-        parking_spot = db.query(models.ParkingSpot).filter(models.ParkingSpot.spot_id == detection.spot_id).first()
-
-        if not parking_spot:
-            print(f"Warning: Spot Id '{detection.spot_id}' not found in database. Skipping")
-            continue
-
-        is_error = parking_spot.designated_bus_id != detection.bus_number
-
-        new_log_entry = models.ParkingLog(
-            spot_id=detection.spot_id,
-            detected_bus_id=detection.bus_number,
-            camera_id=payload.camera_id,
-            is_error=is_error
-        )
-        db.add(new_log_entry)
-
+        existing_location = db.query(models.BusLocation).filter(models.BusLocation.spot_id == detection.spot_id).first()
+        if existing_location:
+            existing_location.detected_bus_id = detection.bus_number
+            existing_location.camera_id = payload.camera_id
+        else:
+            new_location = models.BusLocation(
+                spot_id=detection.spot_id,
+                detected_bus_id=detection.bus_number,
+                camera_id=payload.camera_id
+            )
+            db.add(new_location)
+        
     db.commit()
-    return {"status": "success", "message": f"Processed {len(payload.detections)} detections."}
+    return {"status": "success", "message": f"Updated locations for {len(payload.detections)} buses."}
 
 
 @app.get("/api/status")
 def get_parking_status(db: Session = Depends(get_db)):
-    all_spots = db.query(models.ParkingSpot).all()
-    all_logs = db.query(models.ParkingLog).all()
+    """
+    Provides the complete, current status of all parking spots to the frontend.
+    """
+    all_spots = db.query(models.Spot).all()
+    bus_locations = db.query(models.BusLocation).all()
 
-    log_map = {log.spot_id: log for log in all_logs}
+    location_map = {loc.spot_id: loc.detected_bus_id for loc in bus_locations}
+    
     status_data = []
     for spot in all_spots:
-        current_log = log_map.get(spot.spot_id)
-
         status_data.append({
             "spotId": spot.spot_id,
-            "designatedBus": spot.designated_bus_id,
-            "actualBus": current_log.detected_bus_id if current_log else None, 
-            "isError": current_log.is_error if current_log else False, 
+            "actualBus": location_map.get(spot.spot_id), # Returns the bus number or None if empty
             "cameraId": spot.camera_id,
             "coordinates": spot.coordinates_json,
         })
-
+        
     return status_data
-    
